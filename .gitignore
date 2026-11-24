@@ -4,6 +4,8 @@
 web/.env.local
 .env
 .vagrant/
+.vagrant-bootstrap.lock
+.vagrant-app-image-built
 web/node_modules
 web/.next
 

@@ -1,9 +1,13 @@
+ENV["VAGRANT_DEFAULT_PROVIDER"] = "docker"
+
 require "dotenv/load"
 require "shellwords"
 
 REPOSITORY_URL = "https://github.com/PedroGaspdev/cloud-proj-3.git"
 REPOSITORY_BRANCH = ENV.fetch("APP_GIT_BRANCH", "main")
 SOURCE_DIR = File.expand_path(".vagrant/project-source", __dir__)
+BOOTSTRAP_LOCK = File.expand_path(".vagrant-bootstrap.lock", __dir__)
+BUILD_MARKER = File.expand_path(".vagrant-app-image-built", __dir__)
 
 required_env = %w[DB_NAME DB_USER DB_PASSWORD MYSQL_ROOT_PASSWORD JWT_SECRET]
 missing_env = required_env.reject { |key| ENV.key?(key) && !ENV[key].empty? }
@@ -16,28 +20,41 @@ unless DB_HOST == "db"
   raise "DB_HOST deve ser 'db' para resolver o banco pela rede Docker."
 end
 
+bootstrap_script = <<~SHELL
+  set -euo pipefail
+  mkdir -p #{Shellwords.escape(File.dirname(SOURCE_DIR))}
+  if [ -d #{Shellwords.escape(File.join(SOURCE_DIR, ".git"))} ]; then
+    git -C #{Shellwords.escape(SOURCE_DIR)} pull --ff-only
+  else
+    git clone --depth 1 --single-branch \
+      --branch #{Shellwords.escape(REPOSITORY_BRANCH)} \
+      -- #{Shellwords.escape(REPOSITORY_URL)} \
+      #{Shellwords.escape(SOURCE_DIR)}
+  fi
+
+  commit="$(git -C #{Shellwords.escape(SOURCE_DIR)} rev-parse HEAD)"
+  if [ ! -f #{Shellwords.escape(BUILD_MARKER)} ] ||
+     [ "$(cat #{Shellwords.escape(BUILD_MARKER)})" != "$commit" ] ||
+     ! docker image inspect clube-app:local >/dev/null 2>&1; then
+    docker build --tag clube-app:local #{Shellwords.escape(SOURCE_DIR)}
+    printf '%s\\n' "$commit" > #{Shellwords.escape(BUILD_MARKER)}
+  fi
+
+  if docker network inspect rede_interna >/dev/null 2>&1; then
+    if [ "$(docker network inspect --format='{{.Internal}}' rede_interna)" != "true" ]; then
+      echo "A rede rede_interna existe, mas nao esta marcada como interna." >&2
+      exit 1
+    fi
+  else
+    docker network create --internal rede_interna
+  fi
+SHELL
+
 Vagrant.configure("2") do |config|
   config.trigger.before :up do |trigger|
-    trigger.name = "Clonar/atualizar o projeto e preparar a rede Docker"
+    trigger.name = "Preparar o código e a rede Docker"
     trigger.run = {
-      inline: <<~SHELL
-        mkdir -p #{Shellwords.escape(File.dirname(SOURCE_DIR))}
-        if [ ! -d #{Shellwords.escape(File.join(SOURCE_DIR, ".git"))} ]; then
-          git clone --depth 1 --single-branch \
-            --branch #{Shellwords.escape(REPOSITORY_BRANCH)} \
-            -- #{Shellwords.escape(REPOSITORY_URL)} \
-            #{Shellwords.escape(SOURCE_DIR)}
-        fi
-        docker build --tag clube-app:local #{Shellwords.escape(SOURCE_DIR)}
-        if docker network inspect rede_interna >/dev/null 2>&1; then
-          if [ "$(docker network inspect --format='{{.Internal}}' rede_interna)" != "true" ]; then
-            echo "A rede rede_interna existe, mas nao esta marcada como interna." >&2
-            exit 1
-          fi
-        else
-          docker network create --internal rede_interna
-        fi
-      SHELL
+      inline: "flock -x #{Shellwords.escape(BOOTSTRAP_LOCK)} bash -c #{Shellwords.escape(bootstrap_script)}"
     }
   end
 
