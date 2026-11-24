@@ -1,0 +1,13 @@
+.env
+*.log
+.vagrant
+web/.env.local
+.env
+.vagrant/
+web/node_modules
+web/.next
+
+.env
+.vagrant/
+web/node_modules
+web/.next
