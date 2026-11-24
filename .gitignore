@@ -11,3 +11,5 @@ web/.next
 .vagrant/
 web/node_modules
 web/.next
+
+GUIA-CONTEINERIZACAO-VAGRANT-DOCKER.md

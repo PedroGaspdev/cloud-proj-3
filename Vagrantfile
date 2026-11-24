@@ -1,184 +1,97 @@
 require "dotenv/load"
+require "shellwords"
 
-DB_NAME = ENV["DB_NAME"]
-DB_USER = ENV["DB_USER"]
-DB_PASSWORD = ENV["DB_PASSWORD"]
-DB_HOST = ENV["DB_HOST"]
-DB_PORT = ENV["DB_PORT"]
-JWT_SECRET = ENV["JWT_SECRET"]
-COOKIE_SECURE = ENV["COOKIE_SECURE"]
+REPOSITORY_URL = "https://github.com/PedroGaspdev/cloud-proj-3.git"
+REPOSITORY_BRANCH = ENV.fetch("APP_GIT_BRANCH", "main")
+SOURCE_DIR = File.expand_path(".vagrant/project-source", __dir__)
+
+required_env = %w[DB_NAME DB_USER DB_PASSWORD MYSQL_ROOT_PASSWORD JWT_SECRET]
+missing_env = required_env.reject { |key| ENV.key?(key) && !ENV[key].empty? }
+unless missing_env.empty?
+  raise "Variáveis ausentes no .env: #{missing_env.join(', ')}"
+end
+
+DB_HOST = ENV.fetch("DB_HOST", "db")
+unless DB_HOST == "db"
+  raise "DB_HOST deve ser 'db' para resolver o banco pela rede Docker."
+end
 
 Vagrant.configure("2") do |config|
+  config.trigger.before :up do |trigger|
+    trigger.name = "Clonar/atualizar o projeto e preparar a rede Docker"
+    trigger.run = {
+      inline: <<~SHELL
+        mkdir -p #{Shellwords.escape(File.dirname(SOURCE_DIR))}
+        if [ ! -d #{Shellwords.escape(File.join(SOURCE_DIR, ".git"))} ]; then
+          git clone --depth 1 --single-branch \
+            --branch #{Shellwords.escape(REPOSITORY_BRANCH)} \
+            -- #{Shellwords.escape(REPOSITORY_URL)} \
+            #{Shellwords.escape(SOURCE_DIR)}
+        fi
+        docker build --tag clube-app:local #{Shellwords.escape(SOURCE_DIR)}
+        if docker network inspect rede_interna >/dev/null 2>&1; then
+          if [ "$(docker network inspect --format='{{.Internal}}' rede_interna)" != "true" ]; then
+            echo "A rede rede_interna existe, mas nao esta marcada como interna." >&2
+            exit 1
+          fi
+        else
+          docker network create --internal rede_interna
+        fi
+      SHELL
+    }
+  end
 
-    config.vm.define "proxy" do |proxy|
-        proxy.vm.box = "ubuntu/focal64"
-        proxy.vm.hostname = "proxy"
-        proxy.vm.network "private_network", ip: "192.168.57.10", netmask: "255.255.255.0"
-        proxy.vm.network "private_network", ip: "192.168.56.10", netmask: "255.255.255.0", virtualbox__intnet: "rede_interna"
-
-        proxy.vm.network "forwarded_port", guest: 80, host: 8080, host_ip: "127.0.0.1"
-
-        proxy.vm.provider "virtualbox" do |vb|
-            vb.memory = "1024"
-            vb.cpus = 1
-            vb.name = "VM1-proxy"
-        end
-
-        proxy.vm.synced_folder "./nginx", "/home/vagrant/nginx"
-
-        proxy.vm.provision "shell", inline: <<-SHELL
-
-            sudo apt-get -y update && sudo apt-get -y upgrade
-            sudo apt-get install -y nginx openssl net-tools
-            sudo cp /home/vagrant/nginx/reverse-proxy.conf \
-                    /etc/nginx/sites-available/reverse-proxy
-
-            sudo rm -f /etc/nginx/sites-enabled/default
-
-            sudo ln -sf \
-                /etc/nginx/sites-available/reverse-proxy \
-                /etc/nginx/sites-enabled/reverse-proxy
-
-            sudo nginx -t
-            sudo systemctl restart nginx
-
-            echo "=================================================="
-            echo "  ACESSE A APLICACAO EM: http://192.168.57.10"
-            echo "=================================================="
-        SHELL
+  config.vm.define "DB" do |db|
+    db.vm.provider "docker" do |docker|
+      docker.image = "mysql:8"
+      docker.name = "clube-db"
+      docker.create_args = [
+        "--network=rede_interna",
+        "--network-alias=db"
+      ]
+      docker.env = {
+        "MYSQL_DATABASE" => ENV.fetch("DB_NAME"),
+        "MYSQL_USER" => ENV.fetch("DB_USER"),
+        "MYSQL_PASSWORD" => ENV.fetch("DB_PASSWORD"),
+        "MYSQL_ROOT_PASSWORD" => ENV.fetch("MYSQL_ROOT_PASSWORD")
+      }
+      docker.volumes = [
+        "clube_mysql_data:/var/lib/mysql",
+        "#{SOURCE_DIR}/db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro,Z",
+        "#{SOURCE_DIR}/db/seed.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro,Z"
+      ]
     end
+  end
 
-
-
-    config.vm.define "appserver" do |appserver|
-        appserver.vm.box = "ubuntu/focal64"
-        appserver.vm.hostname = "appserver"
-        appserver.vm.network "private_network", ip: "192.168.56.20",
-                             netmask: "255.255.255.0", virtualbox__intnet: "rede_interna"
-
-        appserver.vm.provider "virtualbox" do |vb|
-            vb.memory = "2048"
-            vb.cpus = 1
-            vb.name = "VM2-appserver"
-        end
-
-        #Sincroniza a pasta do projeto com a pasta da VM, permitindo alteracoes em tempo real
-        appserver.vm.synced_folder "./web", "/home/vagrant/app"
-
-        appserver.vm.provision "shell", inline: <<-SHELL
-            set -e
-
-            echo "==> Atualizando sistema..."
-            sudo apt-get update
-
-            echo "==> Instalando pacotes..."
-            sudo apt-get install -y \
-                net-tools \
-                curl \
-                git \
-                build-essential \
-                mysql-client \
-
-            
-            echo "DB_HOST=#{DB_HOST}" > /home/vagrant/app/.env.local
-            echo "DB_PORT=#{DB_PORT}" >> /home/vagrant/app/.env.local
-            echo "DB_NAME=#{DB_NAME}" >> /home/vagrant/app/.env.local
-            echo "DB_USER=#{DB_USER}" >> /home/vagrant/app/.env.local
-            echo "DB_PASSWORD=#{DB_PASSWORD}" >> /home/vagrant/app/.env.local
-            echo "JWT_SECRET=#{JWT_SECRET}" >> /home/vagrant/app/.env.local
-            echo "COOKIE_SECURE=#{COOKIE_SECURE}" >> /home/vagrant/app/.env.local
-
-            echo "==> Instalando Node.js..."
-            curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
-            sudo apt-get install -y nodejs
-
-            echo "==> Verificando Node.js..."
-            node --version
-            npm --version
-
-            echo "==> Instalando dependências do projeto..."
-            cd /home/vagrant/app
-          
-            npm install --no-bin-links
-
-            echo "==> Compilando a aplicacao (modo producao)..."
-            # --webpack: o next.config.ts define watchOptions do webpack (polling
-            # para o synced_folder), e o Turbopack, padrao no Next 16, recusa o
-            # build quando encontra configuracao de webpack sem a dele.
-            npm run build -- --webpack
-
-            echo "==> Configurando servico do Next.js..."
-            sudo tee /etc/systemd/system/clube-app.service > /dev/null <<'UNIT'
-[Unit]
-Description=Clube Reservas - Next.js
-After=network-online.target
-
-[Service]
-Type=simple
-User=vagrant
-WorkingDirectory=/home/vagrant/app
-ExecStart=/usr/bin/npm run start
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-            sudo systemctl daemon-reload
-            sudo systemctl enable --now clube-app
-
-            echo "==> Aplicacao disponivel via proxy em http://192.168.57.10"
-
-        SHELL
+  config.vm.define "appserver" do |app|
+    app.vm.provider "docker" do |docker|
+      docker.image = "clube-app:local"
+      docker.name = "clube-app"
+      docker.create_args = [
+        "--network=rede_interna",
+        "--network-alias=appserver"
+      ]
+      docker.env = {
+        "DB_HOST" => DB_HOST,
+        "DB_PORT" => ENV.fetch("DB_PORT", "3306"),
+        "DB_NAME" => ENV.fetch("DB_NAME"),
+        "DB_USER" => ENV.fetch("DB_USER"),
+        "DB_PASSWORD" => ENV.fetch("DB_PASSWORD"),
+        "JWT_SECRET" => ENV.fetch("JWT_SECRET"),
+        "COOKIE_SECURE" => ENV.fetch("COOKIE_SECURE", "false")
+      }
     end
+  end
 
-
-
-    config.vm.define "DB" do |db|
-        db.vm.box = "ubuntu/focal64"
-        db.vm.hostname = "DB"
-        db.vm.network "private_network", ip: "192.168.56.30",
-                      netmask: "255.255.255.0", virtualbox__intnet: "rede_interna"
-
-        db.vm.provider "virtualbox" do |vb|
-            vb.memory = "2048"
-            vb.cpus = 1
-            vb.name = "VM3-DB"
-        end
-
-        db.vm.synced_folder "./db", "/home/vagrant/db"
-
-        db.vm.provision "shell", inline: <<-SHELL
-
-            sudo apt-get -y update && sudo apt-get -y upgrade
-            sudo apt-get install -y net-tools mysql-server
-
-            #Libera o mysql para receber requisicoes de outros servidores/computadores
-            sudo sed -i 's/127.0.0.1/0.0.0.0/g' /etc/mysql/mysql.conf.d/mysqld.cnf
-            #Restarta o mysql para aplicar configuracao
-            sudo systemctl restart mysql
-
-            #Configura usuario e senha
-            sudo mysql -e "CREATE USER IF NOT EXISTS '#{DB_USER}'@'192.168.56.20' IDENTIFIED BY '#{DB_PASSWORD}';"
-
-            # Importa banco e tabelas
-            if [ -f "/home/vagrant/db/schema.sql" ]; then
-                echo "--> Importando tabelas do schema.sql..."
-                sudo mysql < /home/vagrant/db/schema.sql
-            fi
-
-            if [ -f "/home/vagrant/db/seed.sql" ]; then
-                echo "--> Importando dados iniciais do seed.sql..."
-                sudo mysql < /home/vagrant/db/seed.sql
-            fi      
-
-            #Concede permissoes totais sobre a db ao usuario
-            sudo mysql -e "GRANT ALL PRIVILEGES ON #{DB_NAME}.* TO '#{DB_USER}'@'192.168.56.20';"
-            sudo mysql -e "FLUSH PRIVILEGES;"
-
-
-        SHELL
+  config.vm.define "proxy" do |proxy|
+    proxy.vm.provider "docker" do |docker|
+      docker.image = "nginx:alpine"
+      docker.name = "clube-proxy"
+      docker.create_args = ["--network=rede_interna"]
+      docker.ports = ["127.0.0.1:8080:80"]
+      docker.volumes = [
+        "#{SOURCE_DIR}/nginx/reverse-proxy.conf:/etc/nginx/conf.d/default.conf:ro,Z"
+      ]
     end
-
+  end
 end

@@ -1,0 +1,9 @@
+.git
+.vagrant
+.env
+.env.*
+*.log
+web/.env.local
+web/nohup.out
+web/node_modules
+web/.next
