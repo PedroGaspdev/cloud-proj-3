@@ -6,28 +6,20 @@ gerencia os contêineres Docker da aplicação, do banco e do proxy reverso Ngin
 ## Arquitetura
 
 ```text
-Navegador
-   │ http://localhost:8080
-   ▼
-┌─────────────────────┐
-│ proxy — Nginx        │  única porta publicada no hospedeiro
-└──────────┬──────────┘
-           │ rede Docker interna: rede_interna
-     ┌─────┴────────────┐
-     ▼                  ▼
-┌───────────────┐  ┌───────────────┐
-│ appserver     │─▶│ DB            │
-│ Next.js :3000 │  │ MySQL :3306   │
-└───────────────┘  └───────────────┘
+Navegador -- http://localhost:8080 --> proxy (Nginx)
+                                         ├── rede_interna ── appserver ── DB
+                                         └── rede_externa ── porta do hospedeiro
 ```
 
 O Nginx encaminha para `appserver:3000`; a aplicação conecta ao MySQL pelo
-alias `db`. As portas da aplicação e do banco não são publicadas no hospedeiro.
-O banco persiste em um volume Docker nomeado.
+alias `db`. O proxy participa das duas redes: `rede_interna` conecta os
+serviços sem expor o app ou o banco, e `rede_externa` permite publicar a porta
+`8080` no hospedeiro. As portas da aplicação e do banco não são publicadas. O
+banco persiste em um volume Docker nomeado.
 
 | Serviço | Imagem/construção | Rede | Porta no hospedeiro |
 |---|---|---|---|
-| `proxy` | `nginx:alpine` | `rede_interna` | `127.0.0.1:8080` |
+| `proxy` | `nginx:alpine` | `rede_interna`, `rede_externa` | `127.0.0.1:8080` |
 | `appserver` | build do `Dockerfile` | `rede_interna` | nenhuma |
 | `DB` | `mysql:8` | `rede_interna` | nenhuma |
 
@@ -96,7 +88,7 @@ validação e bootstrap, consulte [GUIA-CONTEINERIZACAO-VAGRANT-DOCKER.md](./GUI
 | Parar sem apagar os dados | `vagrant halt` |
 | Ver o estado | `vagrant status` |
 | Ver logs | `docker logs -f clube-app` |
-| Inspecionar a rede | `docker network inspect rede_interna` |
+| Inspecionar redes | `docker network inspect rede_interna rede_externa` |
 | Acessar o MySQL | `docker exec -it clube-db mysql -u root -p` |
 
 O checkout em `.vagrant/project-source` é separado da cópia de trabalho usada

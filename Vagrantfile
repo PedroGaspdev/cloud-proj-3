@@ -48,6 +48,17 @@ bootstrap_script = <<~SHELL
   else
     docker network create --internal rede_interna
   fi
+
+  if docker network inspect rede_externa >/dev/null 2>&1; then
+    external_driver="$(docker network inspect --format='{{.Driver}}' rede_externa)"
+    external_internal="$(docker network inspect --format='{{.Internal}}' rede_externa)"
+    if [ "$external_driver" != "bridge" ] || [ "$external_internal" != "false" ]; then
+      echo "A rede rede_externa deve ser uma bridge Docker nao interna." >&2
+      exit 1
+    fi
+  else
+    docker network create --driver bridge rede_externa
+  fi
 SHELL
 
 Vagrant.configure("2") do |config|
@@ -109,6 +120,20 @@ Vagrant.configure("2") do |config|
       docker.volumes = [
         "#{SOURCE_DIR}/nginx/reverse-proxy.conf:/etc/nginx/conf.d/default.conf:ro,Z"
       ]
+    end
+
+    proxy.trigger.after :up do |trigger|
+      trigger.name = "Conectar o proxy à rede externa"
+      attach_script = <<~SHELL
+        set -euo pipefail
+        if ! docker inspect --format='{{json .NetworkSettings.Networks}}' clube-proxy |
+             grep -q '"rede_externa"'; then
+          docker network connect rede_externa clube-proxy
+        fi
+      SHELL
+      trigger.run = {
+        inline: "bash -c #{Shellwords.escape(attach_script)}"
+      }
     end
   end
 end
